@@ -34,6 +34,29 @@ class LaneCenterlinesTests(unittest.TestCase):
         image = np.zeros((240, 400, 3), dtype=np.uint8)
         np.testing.assert_array_equal(get_road_boundaries(image), image)
 
+    def test_only_paint_coloured_stripes_are_drawn(self):
+        for name, bgr, drawn in (
+            ("white", (255, 255, 255), True),
+            ("yellow", (0, 200, 255), True),
+            ("grass", (0, 200, 0), False),
+        ):
+            with self.subTest(colour=name):
+                image = np.zeros((240, 400, 3), dtype=np.uint8)
+                image[:, 196:205] = bgr
+                changed = np.any(get_road_boundaries(image) != image)
+                self.assertEqual(changed, drawn)
+
+    def test_every_segment_of_a_curved_marking_is_drawn(self):
+        image = np.zeros((240, 400, 3), dtype=np.uint8)
+        for y in range(240):
+            x = 150 + (240 - y) ** 2 // 150
+            image[y, x:x + 9] = 255
+        drawn = np.any(get_road_boundaries(image) != image, axis=2)
+        rows = np.flatnonzero(drawn.any(axis=1))
+        # ROI starts at row 144; the line must reach near it, not stop after one segment.
+        self.assertLess(rows.min(), 160)
+        self.assertGreater(rows.max(), 230)
+
     def test_middle_marking_on_a_curve_can_be_right_of_image_center(self):
         left = np.array([[[80, 360]], [[20, 240]]], dtype=np.int32)
         center = np.array([[[430, 350]], [[200, 230]]], dtype=np.int32)

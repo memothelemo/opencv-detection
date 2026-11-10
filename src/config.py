@@ -8,6 +8,12 @@ ROI_TOP_RATIO = 0.60
 # on either side of the image midpoint, measured at the lowest detected point.
 CENTER_POSITION_TOLERANCE_RATIO = 0.10
 
+# Marking colours in OpenCV HSV (hue 0-179): white paint is unsaturated, yellow
+# paint sits below the hue of grass. Tuned on the sample images.
+MAX_WHITE_SATURATION = 60
+YELLOW_HUE_MIN = 10
+YELLOW_HUE_MAX = 28
+
 CONTOUR_EPSILON = 0.75
 DASH_ALIGNMENT_TOLERANCE = 8
 MERGE_CENTER_DISTANCE = 12

@@ -62,23 +62,20 @@ def get_road_boundaries(
         cv2.drawContours(contour_edges, [contour], -1, 255, 1)
 
     # Average out the contour edges into a single flowing line (possibly)
-    left, center, right = get_lane_centerlines(contour_edges, blurred_gray_image)
+    # Paint is white (unsaturated) or yellow; this rejects grass and foliage.
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    marking_mask = cv2.inRange(hsv, (0, 0, 0), (179, config.MAX_WHITE_SATURATION, 255))
+    marking_mask |= cv2.inRange(
+        hsv, (config.YELLOW_HUE_MIN, 0, 0), (config.YELLOW_HUE_MAX, 255, 255)
+    )
+
+    left, center, right = get_lane_centerlines(contour_edges, blurred_gray_image, marking_mask)
     output = image.copy()
 
-    if left is not None:
-        x1, y1 = left[0][0]
-        x2, y2 = left[1][0]
-        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-    if right is not None:
-        x1, y1 = right[0][0]
-        x2, y2 = right[1][0]
-        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-    if center is not None:
-        x1, y1 = center[0][0]
-        x2, y2 = center[1][0]
-        cv2.line(output, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    # Draw every segment of each polyline, not just the first, so curves are followed.
+    for line, color in ((left, (0, 255, 0)), (right, (0, 255, 0)), (center, (0, 0, 255))):
+        if line is not None:
+            cv2.polylines(output, [line], isClosed=False, color=color, thickness=3)
 
     # It must not draw above the ROI boundary either.
     top = int(image.shape[0] * config.ROI_TOP_RATIO)
@@ -88,9 +85,12 @@ def get_road_boundaries(
 
 # Track the midpoint between nearby edges from the bottom of the image upward.
 def get_lane_centerlines(
-    contour_edges: MatLike, grayscale_image: MatLike
+    contour_edges: MatLike, grayscale_image: MatLike, marking_mask: MatLike | None = None
 ) -> tuple[MatLike | None, MatLike | None, MatLike | None]:
-    """Return (left, center, right) polylines, with None for missing markings."""
+    """Return (left, center, right) polylines, with None for missing markings.
+
+    If given, marking_mask is nonzero where the pixel colour could be road paint.
+    """
     height, width = contour_edges.shape
     top = int(height * config.ROI_TOP_RATIO)
     tracks = []
@@ -109,6 +109,8 @@ def get_lane_centerlines(
 
             # Avoid averaging across a dark gap between separate markings.
             middle = (left + right) // 2
+            if marking_mask is not None and not marking_mask[y, middle]:
+                continue
             inside = float(grayscale_image[y, middle])
             outside = max(float(grayscale_image[y, left - 4]), float(grayscale_image[y, right + 4]))
             contrast = inside - outside
