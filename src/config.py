@@ -1,3 +1,11 @@
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent.parent
+IMAGES_DIR = ROOT_DIR / "images"
+
+# Target image to use to detect road lanes
+TARGET_IMAGE = IMAGES_DIR / "straight-lane-2.jpg"
+
 CANNY_LOW = 50
 CANNY_HIGH = 150
 

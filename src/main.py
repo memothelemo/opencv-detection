@@ -2,20 +2,13 @@ import cv2
 import numpy as np
 
 from cv2.typing import MatLike
-from pathlib import Path
 
 from src import config
 
-ROOT_DIR = Path(__file__).parent.parent
-IMAGES_DIR = ROOT_DIR / "images"
-
-# Target image to use to detect road lanes
-TARGET_IMAGE = IMAGES_DIR / "curves.jpg"
-
 def main() -> int:
-    image = cv2.imread(TARGET_IMAGE)
+    image = cv2.imread(config.TARGET_IMAGE)
     if image is None:
-        print(f"[x] Could not find image: {TARGET_IMAGE}!")
+        print(f"[x] Could not find image: {config.TARGET_IMAGE}!")
         return 1
 
     cv2.imshow("Road Detection System", get_road_boundaries(image))
