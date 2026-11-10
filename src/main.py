@@ -4,224 +4,302 @@ import numpy as np
 from cv2.typing import MatLike
 from pathlib import Path
 
-WINDOW_TITLE = "Road Lane Detection Program"
-ROI_Y_RATIO = 0.5
+from src import config
 
-# Path to the root repository directory
 ROOT_DIR = Path(__file__).parent.parent
 IMAGES_DIR = ROOT_DIR / "images"
 
 # Target image to use to detect road lanes
-TARGET_IMAGE = IMAGES_DIR / "straight-lane.jpg"
+TARGET_IMAGE = IMAGES_DIR / "curves.jpg"
 
-def adjust_gamma(image: MatLike, gamma=1.0):
-    inv_gamma = 1.0 / gamma
-    table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-    return cv2.LUT(image, table)
-
-# Gets the two end points of an average line
-def get_average_line_points(lines, y_top, y_bottom):
-    if lines is None: return None
-
-    models = []
-    weights = []
-
-    for x1, y1, x2, y2 in np.asarray(lines, dtype=float).reshape(-1, 4):
-        dx = x2 - x1
-        dy = y2 - y1
-
-        if dy == 0: continue
-
-        a = dx / dy
-        b = x1 - a * y1
-
-        models.append((a, b))
-        weights.append(np.hypot(dx, dy))
-
-    if not models: return None
-
-    a, b = np.average(models, axis=0, weights=weights)
-    top = (round(a * y_top + b), int(y_top))
-    bottom = (round(a * y_bottom + b), int(y_bottom))
-
-    return top, bottom
-
-def isolate_left_and_right_lines(lines):
-    left_lines = []
-    right_lines = []
-
-    for line in lines:
-        x1, y1, x2, y2 = line
-
-        # there's no reason to have the same equal lines
-        if x1 == x2: continue
-
-        slope = (y2 - y1) / (x2 - x1)
-        if slope < 0: left_lines.append(line)
-        else: right_lines.append(line)
-
-    return left_lines, right_lines
-
-# The reason why we need to have a region of interest, while I was reading
-# a guide online, because it is expected that an image has clouds and other
-# environmental objects that may affect the road detection.
-#
-# There are many ways to detect but we're focus on this now.
-def make_region_of_interest_mask(image: cv2.typing.MatLike):
-    height, width = image.shape
-    polygon = np.array([[
-        (0, height - 1),
-        (int(0.20 * width), int(ROI_Y_RATIO * height)),
-        (int(0.80 * width), int(ROI_Y_RATIO * height)),
-        (width - 1, height - 1),
-    ]], dtype=np.int32)
-
-    mask = np.zeros_like(image)
-    cv2.fillPoly(mask, polygon, 255)
-
-    return cv2.bitwise_and(image, mask)
-
-def detect_road_markings_by_color(image: MatLike) -> MatLike:
-    # Convert the image's original color space into HSV
-    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-    # Look for the white mask that may look like a road because roads
-    # may look less saturated among the rest of the picture.
-    white_mask = cv2.inRange(
-        hsv_image,
-        np.array([0, 0, 170], dtype=np.uint8),
-        np.array([179, 70, 255], dtype=np.uint8),
-    )
-
-    # Expand the white mask edges with image dilation so we
-    # can see it clearly.
-    near_white = cv2.dilate(
-        white_mask,
-        np.ones((5, 5), dtype=np.uint8),
-        iterations=1
-    )
-
-    return near_white
-
-def detect_with_canny(grayscale_image: MatLike) -> MatLike:
-    return cv2.Canny(image=grayscale_image, threshold1=80, threshold2=150)
-
-# This is the main entrypoint of the application
 def main() -> int:
     image = cv2.imread(TARGET_IMAGE)
     if image is None:
         print(f"[x] Could not find image: {TARGET_IMAGE}!")
         return 1
 
-    # Convert the image into grayscale then blur so we can detect
-    # edges much easier. However we need to differentiate colors with
-    # the help of image dilation which we will discuss below this group.
-    grayscale_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred_image = cv2.blur(src=grayscale_image, ksize=(5, 5))
+    cv2.imshow("Road Detection System", get_road_boundaries(image))
+    cv2.waitKey(0)
+    return 0
+
+# Determines the boundaries of a road.
+def get_road_boundaries(
+    image: MatLike,
+    grayscale_image: MatLike | None = None
+):
+    if image is None:
+        raise ValueError("An input image is required.")
+
+    # Blur before Canny to smoothen out some noise
+    if grayscale_image is None:
+        grayscale_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    elif grayscale_image.shape != image.shape[:2]:
+        raise ValueError("The grayscale image must match the input height and width.")
+
+    blurred_gray_image = cv2.blur(src=grayscale_image, ksize=(5, 5))
+
+    # Adjust contrast before detecting edges.
+    corrected_image = correct_gamma(blurred_gray_image, gamma=1.5)
 
     # Use Canny edge detection (reliable way to edge possible road markings)
-    roi_mask = make_region_of_interest_mask(grayscale_image)
-    canny_edges = detect_with_canny(blurred_image)
-    possible_road_edges_from_color = detect_road_markings_by_color(image)
-
-    maybe_road_edges = cv2.bitwise_and(
-        cv2.bitwise_and(canny_edges, roi_mask),
-        possible_road_edges_from_color
+    canny_edges = cv2.Canny(
+        image=corrected_image,
+        threshold1=config.CANNY_LOW,
+        threshold2=config.CANNY_HIGH
     )
+    roi_mask = make_contour_roi(canny_edges)
+    maybe_road_edges = cv2.bitwise_and(canny_edges, roi_mask)
 
-    # Detecting straight lines using the Hough transform
-    maybe_road_edges = cv2.HoughLinesP(
-        image=maybe_road_edges,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=30,
-        minLineLength=150,
-        maxLineGap=80,
-    )
+    # Another way to detect lane markings is to find contours, because road
+    # markings have their own distinct colors.
+    contours, _ = cv2.findContours(maybe_road_edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-    # HoughLinesP return None if we cannot find one
-    if maybe_road_edges is None: maybe_road_edges = []
+    contour_edges = np.zeros_like(maybe_road_edges)
+    for contour in contours:
+        if cv2.arcLength(contour, closed=True) < config.MIN_CONTOUR_LENGTH:
+            continue
 
-    # Isolate slanting to the left or to the right lines
-    to_left_lines, to_right_lines = isolate_left_and_right_lines(maybe_road_edges)
+        cv2.drawContours(contour_edges, [contour], -1, 255, 1)
 
-    image_height = grayscale_image.shape[0]
-    left_line_points = get_average_line_points(
-        to_left_lines,
-        int(image_height * ROI_Y_RATIO),
-        image_height
-    )
-    right_line_points = get_average_line_points(
-        to_right_lines,
-        int(image_height * ROI_Y_RATIO),
-        image_height
-    )
+    # Average out the contour edges into a single flowing line (possibly)
+    left, center, right = get_lane_centerlines(contour_edges, blurred_gray_image)
+    output = image.copy()
 
-    # Rendering the road boundary lines
-    for points in (left_line_points, right_line_points):
-        if points is None: continue
-        start, end = points
-        cv2.line(image, start, end, (0, 255, 0), 3)
+    if left is not None:
+        x1, y1 = left[0][0]
+        x2, y2 = left[1][0]
+        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
-    # Once we're done, we need to get its middle lane line if we have one.
-    # if left_line_points is not None and right_line_points is not None:
-    #     # Make a mask that we can only focus on the road based on the boundary only.
-    #     left_start, left_end = left_line_points
-    #     right_start, right_end = right_line_points
+    if right is not None:
+        x1, y1 = right[0][0]
+        x2, y2 = right[1][0]
+        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
-    #     mask_polygon = np.array([[
-    #         (left_start[0], left_start[1]),
-    #         (left_end[0], left_end[1]),
-    #         (right_end[0], right_end[1]),
-    #         (right_start[0], right_start[1]),
-    #     ]], dtype=np.int32)
+    if center is not None:
+        x1, y1 = center[0][0]
+        x2, y2 = center[1][0]
+        cv2.line(output, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-    #     mask = np.zeros_like(image)
-    #     cv2.fillPoly(mask, mask_polygon, (255, 255, 255))
+    # It must not draw above the ROI boundary either.
+    top = int(image.shape[0] * config.ROI_TOP_RATIO)
+    output[:top] = image[:top]
 
-    #     within_road = cv2.bitwise_and(image, mask)
+    return output
 
-    #     # Do the thing all over again
-    #     grayscale_image = cv2.cvtColor(within_road, cv2.COLOR_BGR2GRAY)
-    #     blurred_image = cv2.blur(src=grayscale_image, ksize=(5, 5))
-    #     high_contrast_image = adjust_gamma(blurred_image, 0.2)
+# Track the midpoint between nearby edges from the bottom of the image upward.
+def get_lane_centerlines(
+    contour_edges: MatLike, grayscale_image: MatLike
+) -> tuple[MatLike | None, MatLike | None, MatLike | None]:
+    """Return (left, center, right) polylines, with None for missing markings."""
+    height, width = contour_edges.shape
+    top = int(height * config.ROI_TOP_RATIO)
+    tracks = []
 
-    #     canny_edges = cv2.Canny(image=high_contrast_image, threshold1=100, threshold2=150)
-    #     maybe_lane_edges = cv2.HoughLinesP(
-    #         image=canny_edges,
-    #         rho=1,
-    #         theta=np.pi / 180,
-    #         threshold=30,
-    #         minLineLength=150,
-    #         maxLineGap=80,
-    #     )
+    for y in range(height - 2, top, -2):
+        pixels = np.flatnonzero(contour_edges[y])
+        runs = np.split(pixels, np.where(np.diff(pixels) > 1)[0] + 1)
+        edges = [int(round(np.mean(run))) for run in runs if len(run)]
 
-    #     # HoughLinesP return None if we cannot find one
-    #     if maybe_lane_edges is None: maybe_lane_edges = []
+        centers = []
+        for left, right in zip(edges, edges[1:]):
+            if not 2 <= right - left <= config.MAX_MARKING_WIDTH:
+                continue
+            if left < 4 or right + 4 >= width:
+                continue
 
-    #     # Isolate slanting to the left or to the right lines
-    #     to_left_lines, to_right_lines = isolate_left_and_right_lines(maybe_lane_edges)
+            # Avoid averaging across a dark gap between separate markings.
+            middle = (left + right) // 2
+            inside = float(grayscale_image[y, middle])
+            outside = max(float(grayscale_image[y, left - 4]), float(grayscale_image[y, right + 4]))
+            contrast = inside - outside
 
-    #     left_line_points = get_average_line_points(
-    #         to_left_lines,
-    #         int(image_height * ROI_Y_RATIO),
-    #         image_height
-    #     )
-    #     right_line_points = get_average_line_points(
-    #         to_right_lines,
-    #         int(image_height * ROI_Y_RATIO),
-    #         image_height
-    #     )
-    #     print(left_line_points)
+            if contrast >= config.MIN_MARKING_CONTRAST:
+                centers.append((left + right) / 2)
 
-    #     # Rendering the road lane lines
-    #     for points in (left_line_points, right_line_points):
-    #         if points is None: continue
-    #         start, end = points
-    #         cv2.line(image, start, end, (255, 0, 0), 3)
+        # Collapse close center candidates to one representative position.
+        # The full cluster width is bounded so distant lanes cannot chain together.
+        clusters = []
+        for x in centers:
+            if not clusters or x - clusters[-1][0] > config.MERGE_CENTER_DISTANCE:
+                clusters.append([x])
+            else:
+                clusters[-1].append(x)
+        centers = [float(np.mean(cluster)) for cluster in clusters]
 
-    cv2.imshow(WINDOW_TITLE, image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+        matches = []
+        for track_index, track in enumerate(tracks):
+            gap = track[-1][1] - y
+            if gap > config.MAX_CENTER_GAP:
+                continue
 
-    return 0
+            # Predict the next position from the recent direction of the track.
+            recent = track[-6:]
+            slope = 0.0
+            if len(recent) > 1:
+                slope = (recent[-1][0] - recent[0][0]) / (recent[-1][1] - recent[0][1])
+            predicted_x = track[-1][0] - gap * slope
+
+            for center_index, x in enumerate(centers):
+                distance = abs(predicted_x - x)
+                if distance <= max(6, gap):
+                    matches.append((distance, track_index, center_index))
+
+        # Give each center to at most one track, starting with the closest match.
+        used_tracks, used_centers = set(), set()
+        for _, track_index, center_index in sorted(matches):
+            if track_index not in used_tracks and center_index not in used_centers:
+                tracks[track_index].append((centers[center_index], y))
+                used_tracks.add(track_index)
+                used_centers.add(center_index)
+        for center_index, x in enumerate(centers):
+            if center_index not in used_centers:
+                tracks.append([(x, y)])
+
+    centerlines = []
+    for track, joined_dashes in join_dashed_tracks(tracks):
+        if len(track) < 10 or track[0][1] - track[-1][1] < config.MIN_CENTER_HEIGHT:
+            continue
+
+        # Fit locally so distant bends do not pull the bottom endpoint sideways.
+        # Use the original samples for every fit, including one-sided endpoint fits.
+        points = np.array(track, dtype=np.float32)
+        if joined_dashes:
+            # A verified straight sequence can bridge the gaps between dashes.
+            # Beyond the last observed dash, this is an estimate, not a detection.
+            slope, intercept = np.polyfit(points[:, 1], points[:, 0], 1)
+            end_y = int(points[-1, 1])
+            if end_y - top <= config.MAX_DASH_EXTENSION and 0 <= slope * top + intercept < width:
+                end_y = top
+            ys = np.append(np.arange(points[0, 1], end_y, -2), end_y)
+            points = np.column_stack((slope * ys + intercept, ys)).astype(np.float32)
+
+        original_x = points[:, 0].copy()
+        for index, (_, y) in enumerate(points):
+            offsets = points[:, 1] - y
+            nearby = np.abs(offsets) <= config.SMOOTHING_RADIUS
+            if np.count_nonzero(nearby) < 3:
+                continue
+            coefficients = np.polyfit(
+                offsets[nearby] / config.SMOOTHING_RADIUS, original_x[nearby], 2
+            )
+            points[index, 0] = np.clip(coefficients[-1], 0, width - 1)
+
+        # Geometric detection: represent the smooth center as straight segments.
+        polygon = cv2.approxPolyDP(
+            points.reshape(-1, 1, 2),
+            epsilon=config.CONTOUR_EPSILON,
+            closed=False
+        )
+        centerlines.append(np.rint(polygon).astype(np.int32))
+
+    return isolate_lane_markings(centerlines, width)
+
+
+def isolate_lane_markings(
+    centerlines: list[MatLike], image_width: int
+) -> tuple[MatLike | None, MatLike | None, MatLike | None]:
+    """Order markings by their lowest observed point, preserving curved lines.
+
+    With three or more candidates, the outermost lines define the boundaries;
+    the interior line with the greatest vertical span represents the center.
+    With fewer candidates, road-relative positions are ambiguous: use the
+    image center band as a fallback and leave missing slots as None.
+    """
+    def bottom_x(line):
+        points = line.reshape(-1, 2)
+        return int(points[np.argmax(points[:, 1]), 0])
+
+    def vertical_span(line):
+        return int(np.ptp(line.reshape(-1, 2)[:, 1]))
+
+    ordered = sorted(centerlines, key=bottom_x)
+    if len(ordered) >= 3:
+        left, right = ordered[0], ordered[-1]
+        road_middle = (bottom_x(left) + bottom_x(right)) / 2
+        center = max(
+            ordered[1:-1],
+            key=lambda line: (vertical_span(line), -abs(bottom_x(line) - road_middle)),
+        )
+        return left, center, right
+
+    selected = [None, None, None]
+    image_middle = (image_width - 1) / 2
+    center_tolerance = image_width * config.CENTER_POSITION_TOLERANCE_RATIO
+    for line in ordered:
+        x = bottom_x(line)
+        if abs(x - image_middle) <= center_tolerance:
+            slot = 1
+        else:
+            slot = 0 if x < image_middle else 2
+        if selected[slot] is None or vertical_span(line) > vertical_span(selected[slot]):
+            selected[slot] = line
+
+    return selected[0], selected[1], selected[2]
+
+# Join separate dashes only when all their centers support the same straight line
+def join_dashed_tracks(tracks):
+    ordered = sorted(tracks, key=lambda track: track[0][1], reverse=True)
+    used = set()
+    groups = []
+
+    for index, track in enumerate(ordered):
+        if index in used: continue
+
+        used.add(index)
+        merged = list(track)
+        joined = False
+
+        # A long initial section makes a direction
+        if len(merged) >= 10 and merged[0][1] - merged[-1][1] >= config.MIN_CENTER_HEIGHT:
+            # Stop extending this lane without stopping the outer track loop.
+            while True:
+                points = np.asarray(merged, dtype=float)
+                model = np.polyfit(points[:, 1], points[:, 0], 1)
+                dash_fit_error = np.max(np.abs(np.polyval(model, points[:, 1]) - points[:, 0]))
+
+                if dash_fit_error > config.MAX_DASH_FIT_ERROR:
+                    break
+
+                matches = []
+                for candidate_index, candidate in enumerate(ordered):
+                    if candidate_index in used or len(candidate) < 3:
+                        continue
+
+                    center_gap = merged[-1][1] - candidate[0][1]
+                    if not config.MAX_CENTER_GAP < center_gap <= config.MAX_DASH_GAP:
+                        continue
+
+                    candidate_points = np.asarray(candidate, dtype=float)
+                    errors = np.abs(np.polyval(model, candidate_points[:, 1]) - candidate_points[:, 0])
+
+                    if np.max(errors) > config.DASH_ALIGNMENT_TOLERANCE:
+                        continue
+
+                    combined = np.vstack((points, candidate_points))
+                    fitted = np.polyfit(combined[:, 1], combined[:, 0], 1)
+                    residuals = np.abs(np.polyval(fitted, combined[:, 1]) - combined[:, 0])
+
+                    if np.max(residuals) <= config.MAX_DASH_FIT_ERROR:
+                        matches.append((float(np.mean(errors)), center_gap, candidate_index))
+
+                if not matches:
+                    break
+
+                _, _, best_index = min(matches)
+                merged.extend(ordered[best_index])
+                used.add(best_index)
+                joined = True
+
+        groups.append((merged, joined))
+
+    return groups
+
+def make_contour_roi(canny_edges: MatLike) -> MatLike:
+    mask = np.zeros_like(canny_edges)
+    top = int(canny_edges.shape[0] * config.ROI_TOP_RATIO)
+    mask[top:, :] = 255
+    return mask
+
+# Adjusts the image's gamma
+def correct_gamma(image: MatLike, gamma = 1.0):
+    return np.array(255 * (image / 255) ** gamma, dtype='uint8')
